@@ -123,7 +123,7 @@ training_args = Seq2SeqTrainingArguments(
     logging_steps=500,
     save_steps=1000,
     eval_steps=1000,
-    evaluation_strategy="steps",
+    eval_strategy="steps",
     save_strategy="steps",
     load_best_model_at_end=True
 )
