@@ -19,8 +19,8 @@ import evaluate
 
 # Load dataset
 common_voice = DatasetDict()
-common_voice["train"] = load_dataset("mozilla-foundation/common_voice_17_0", "hi", split="train+validation")
-common_voice["test"] = load_dataset("mozilla-foundation/common_voice_17_0", "hi", split="test")
+common_voice["train"] = load_dataset("mozilla-foundation/common_voice_17_0", "hi", split="train+validation").select(range(100))
+common_voice["test"] = load_dataset("mozilla-foundation/common_voice_17_0", "hi", split="test").select(range(100))
 
 print(common_voice)
 
