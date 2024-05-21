@@ -16,6 +16,10 @@ import evaluate
 
 # Login to Hugging Face (comment out if not needed)
 # login()
+from datasets import load_dataset
+
+dataset = load_dataset("mozilla-foundation/common_voice_17_0", "hi", split="train", cache_dir="/root/.cache/huggingface/datasets/", trust_remote_code=True)
+
 
 # Load dataset
 common_voice = DatasetDict()
@@ -111,32 +115,57 @@ def compute_metrics(pred):
     return {"wer": wer}
 
 # Training arguments
-training_args = Seq2SeqTrainingArguments(
-    output_dir="./whisper-large-v3-hi",
-    per_device_train_batch_size=16,
-    learning_rate=1e-5,
-    weight_decay=0.01,
-    save_total_limit=3,
-    num_train_epochs=3,
-    predict_with_generate=True,
-    logging_dir='./logs',
-    logging_steps=500,
+# training_args = Seq2SeqTrainingArguments(
+#     output_dir="./whisper-large-v3-hi",
+#     per_device_train_batch_size=16,
+#     learning_rate=1e-5,
+#     weight_decay=0.01,
+#     save_total_limit=3,
+#     num_train_epochs=3,
+#     predict_with_generate=True,
+#     logging_dir='./logs',
+#     logging_steps=500,
+#     save_steps=1000,
+#     eval_steps=1000,
+#     eval_strategy="steps",
+#     save_strategy="steps",
+#     load_best_model_at_end=True
+# )
+
+# # Trainer
+# trainer = Seq2SeqTrainer(
+#     args=training_args,
+#     model=model,
+#     train_dataset=common_voice["train"],
+#     eval_dataset=common_voice["test"],
+#     data_collator=data_collator,
+#     compute_metrics=compute_metrics,
+#     tokenizer=processor.feature_extractor,
+# )
+
+training_args = TrainingArguments(
+    output_dir="./results",                 # Output directory
+    per_device_train_batch_size=4,          # Reduce batch size
+    per_device_eval_batch_size=4,           # Reduce eval batch size
+    gradient_accumulation_steps=8,          # Gradient accumulation steps
+    num_train_epochs=3,                     # Number of training epochs
+    fp16=False,                             # Disable mixed precision if enabled
+    logging_dir="./logs",                   # Logging directory
+    logging_steps=10,
     save_steps=1000,
-    eval_steps=1000,
-    eval_strategy="steps",
-    save_strategy="steps",
-    load_best_model_at_end=True
+    evaluation_strategy="steps",            # Evaluation strategy to perform during training
+    eval_steps=500,                         # Number of steps between evaluations
 )
 
-# Trainer
-trainer = Seq2SeqTrainer(
-    args=training_args,
-    model=model,
-    train_dataset=common_voice["train"],
-    eval_dataset=common_voice["test"],
-    data_collator=data_collator,
-    compute_metrics=compute_metrics,
-    tokenizer=processor.feature_extractor,
+# Clear CUDA cache
+torch.cuda.empty_cache()
+
+# Initialize Trainer
+trainer = Trainer(
+    model=model,                            # The model to train
+    args=training_args,                     # Training arguments
+    train_dataset=dataset,                  # Training dataset
+    eval_dataset=dataset                    # Evaluation dataset, replace with a separate evaluation set if available
 )
 
 trainer.train()
