@@ -1,98 +1,86 @@
-# -*- coding: utf-8 -*-
-"""
-Refactored script from Jupyter Notebook for standalone execution
-"""
 
-# Install necessary packages if not already installed
-# !pip install --upgrade datasets[audio] transformers accelerate evaluate jiwer tensorboard gradio
+import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
-from huggingface_hub import login
 from datasets import load_dataset, DatasetDict
-from transformers import (WhisperFeatureExtractor, WhisperTokenizer, 
-                          WhisperProcessor, WhisperForConditionalGeneration,
-                          Seq2SeqTrainingArguments, Seq2SeqTrainer)
-from datasets import Audio
-import evaluate
 
+common_voice = DatasetDict()
 
-# Login to Hugging Face (comment out if not needed)
-# login()
-from datasets import load_dataset
-import torch
+common_voice["train"] = load_dataset("mozilla-foundation/common_voice_17_0", "hi", split="train+validation", use_auth_token=True)
+common_voice["test"] = load_dataset("mozilla-foundation/common_voice_17_0", "hi", split="test", use_auth_token=True)
 
 dataset = load_dataset("mozilla-foundation/common_voice_17_0", "hi", split="train", cache_dir="/root/.cache/huggingface/datasets/", trust_remote_code=True)
 
-
-# Load dataset
-common_voice = DatasetDict()
-common_voice["train"] = load_dataset("mozilla-foundation/common_voice_17_0", "hi", split="train+validation").select(range(100))
-common_voice["test"] = load_dataset("mozilla-foundation/common_voice_17_0", "hi", split="test").select(range(100))
-
-print(common_voice)
-
-# Remove unnecessary columns
 common_voice = common_voice.remove_columns(["accent", "age", "client_id", "down_votes", "gender", "locale", "path", "segment", "up_votes"])
 
-# Initialize feature extractor and tokenizer
+from transformers import WhisperFeatureExtractor
+
 feature_extractor = WhisperFeatureExtractor.from_pretrained("openai/whisper-large-v3")
+
+from transformers import WhisperTokenizer
+
 tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-large-v3", language="Hindi", task="transcribe")
 
-# Tokenization example
 input_str = common_voice["train"][0]["sentence"]
 labels = tokenizer(input_str).input_ids
 decoded_with_special = tokenizer.decode(labels, skip_special_tokens=False)
 decoded_str = tokenizer.decode(labels, skip_special_tokens=True)
 
-print(f"Input:                 {input_str}")
-print(f"Decoded w/ special:    {decoded_with_special}")
-print(f"Decoded w/out special: {decoded_str}")
-print(f"Are equal:             {input_str == decoded_str}")
+from transformers import WhisperProcessor
 
-# Initialize processor
-processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3", language="Hindi", task="transcribe", n_proc = 4)
+processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3", language="Hindi", task="transcribe")
 
-print(common_voice["train"][0])
+from datasets import Audio
 
-# Cast audio column
 common_voice = common_voice.cast_column("audio", Audio(sampling_rate=16000))
 
-print(common_voice["train"][0])
-
-# Prepare dataset function
 def prepare_dataset(batch):
     try:
         audio = batch["audio"]
-        batch["input_features"] = processor.feature_extractor(audio["array"], sampling_rate=audio["sampling_rate"]).input_features[0]
-        batch["input_length"] = len(audio["array"]) // processor.feature_extractor.sampling_rate
-        batch["labels"] = processor.tokenizer(batch["sentence"]).input_ids
+        batch["input_features"] = feature_extractor(audio["array"], sampling_rate=audio["sampling_rate"]).input_features[0]
+        batch["labels"] = tokenizer(batch["sentence"]).input_ids
+        return batch
     except Exception as e:
-        print(f"Error in processing batch: {e}")
-    return batch
+        print(f"Error processing batch: {e}")
+        return {
+            "audio": None,
+            "input_features": None,
+            "labels": None
+        }
 
-# Apply dataset preparation
-common_voice = common_voice.map(prepare_dataset, remove_columns=common_voice["train"].column_names)
+common_voice = common_voice.map(prepare_dataset, remove_columns=common_voice.column_names["train"])
 
-# Load model
+from transformers import WhisperForConditionalGeneration
+
 model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-large-v3")
 
-# Data collator
-class DataCollatorSpeechSeq2SeqWithPadding:
-    def __init__(self, processor, decoder_start_token_id):
-        self.processor = processor
-        self.decoder_start_token_id = decoder_start_token_id
+model.generation_config.language = "hindi"
+model.generation_config.task = "transcribe"
+model.generation_config.forced_decoder_ids = None
 
-    def __call__(self, features):
+import torch
+
+from dataclasses import dataclass
+from typing import Any, Dict, List, Union
+
+@dataclass
+class DataCollatorSpeechSeq2SeqWithPadding:
+    processor: Any
+    decoder_start_token_id: int
+
+    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
         input_features = [{"input_features": feature["input_features"]} for feature in features]
         batch = self.processor.feature_extractor.pad(input_features, return_tensors="pt")
 
         label_features = [{"input_ids": feature["labels"]} for feature in features]
         labels_batch = self.processor.tokenizer.pad(label_features, return_tensors="pt")
-
         labels = labels_batch["input_ids"].masked_fill(labels_batch.attention_mask.ne(1), -100)
+
         if (labels[:, 0] == self.decoder_start_token_id).all().cpu().item():
             labels = labels[:, 1:]
 
         batch["labels"] = labels
+
         return batch
 
 data_collator = DataCollatorSpeechSeq2SeqWithPadding(
@@ -100,13 +88,18 @@ data_collator = DataCollatorSpeechSeq2SeqWithPadding(
     decoder_start_token_id=model.config.decoder_start_token_id,
 )
 
-# Evaluation metric
+import evaluate
+
 metric = evaluate.load("wer")
 
 def compute_metrics(pred):
     pred_ids = pred.predictions
     label_ids = pred.label_ids
 
+
+    label_ids[label_ids == -100] = tokenizer.pad_token_id
+
+ 
     label_ids[label_ids == -100] = tokenizer.pad_token_id
 
     pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
@@ -116,26 +109,38 @@ def compute_metrics(pred):
 
     return {"wer": wer}
 
-# Training arguments
+from transformers import Seq2SeqTrainingArguments
+
 training_args = Seq2SeqTrainingArguments(
-    output_dir="./whisper-large-v3-hi",
-    per_device_train_batch_size=16,
+    output_dir="./whisper-Large-v3-hindi",
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=16,
     learning_rate=1e-5,
-    weight_decay=0.01,
-    save_total_limit=3,
-    num_train_epochs=3,
-    predict_with_generate=True,
-    logging_dir='./logs',
-    logging_steps=500,
+    warmup_steps=500,
+    max_steps=2500,
+    gradient_checkpointing=True,
+    fp16=True,
+    eval_strategy="steps",
+    per_device_eval_batch_size=16,
+    predict_with_generate=False,
+    generation_max_length=225,
     save_steps=1000,
     eval_steps=1000,
-    eval_strategy="steps",
-    save_strategy="steps",
-    load_best_model_at_end=True
+    logging_steps=25,
+    report_to=["tensorboard"],
+    load_best_model_at_end=True,
+    metric_for_best_model="wer",
+    greater_is_better=False,
 )
-torch.cuda.empty_cache()
 
-# Trainer
+from transformers import Seq2SeqTrainer
+from accelerate import Accelerator
+
+# Initialize the accelerator
+accelerator = Accelerator()
+device = accelerator.device
+model.to(device)
+
 trainer = Seq2SeqTrainer(
     args=training_args,
     model=model,
@@ -146,4 +151,19 @@ trainer = Seq2SeqTrainer(
     tokenizer=processor.feature_extractor,
 )
 
+processor.save_pretrained(training_args.output_dir)
+
 trainer.train()
+
+
+
+kwargs = {
+    "dataset_tags": "mozilla-foundation/common_voice_17_0",
+    "dataset": "Common Voice 17.0",  # a 'pretty' name for the training dataset
+    "dataset_args": "config: hi, split: test",
+    "language": "hi",
+    "model_name": "Whisper Large v3 Trained on Hindi",  # a 'pretty' name for your model
+    "finetuned_from": "openai/whisper-large-v3",
+    "tasks": "automatic-speech-recognition",
+}
+trainer.push_to_hub(**kwargs)
